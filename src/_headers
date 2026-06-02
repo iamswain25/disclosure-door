@@ -1,0 +1,9 @@
+# Cache static assets
+/style.css
+  Cache-Control: public, max-age=86400
+
+# HTML pages: no cache so updates show immediately
+/posts/*
+  Cache-Control: no-cache
+/
+  Cache-Control: no-cache
