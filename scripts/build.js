@@ -313,15 +313,32 @@ function renderHomePage(videos) {
 
 function renderVideoPage(video, allVideos) {
   // Blog post list
+  const GRADIENTS = [
+    'linear-gradient(135deg, #1a1a3e, #2a1a1a)',
+    'linear-gradient(135deg, #1a2a1a, #1a1a3e)',
+    'linear-gradient(135deg, #2a1a1a, #1a2a1a)',
+    'linear-gradient(135deg, #0a2a3e, #2a1a2a)',
+    'linear-gradient(135deg, #1a2a2a, #3a1a1a)',
+    'linear-gradient(135deg, #2a1a3e, #0a2a1a)',
+    'linear-gradient(135deg, #1a0a2e, #2a2a1a)',
+    'linear-gradient(135deg, #2a2a3e, #1a0a1a)',
+    'linear-gradient(135deg, #0a1a2e, #3a2a1a)',
+    'linear-gradient(135deg, #1a3a2a, #2a0a3e)',
+    'linear-gradient(135deg, #3a1a2a, #1a2a0a)',
+    'linear-gradient(135deg, #0a2a2e, #2a1a0a)',
+  ];
+  const EMOJIS = ['📄', '🛸', '🔬', '🧬', '🌌', '⚡', '🧠', '🔭', '👽', '📡', '🌀', '🎯'];
   let postList = '';
-  for (const post of video.posts) {
+  for (const [idx, post] of video.posts.entries()) {
     const tagsHtml = post.tags.length > 0
       ? `<div class="post-tags">${post.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>`
       : '';
+    const gradient = GRADIENTS[idx % GRADIENTS.length];
+    const emoji = EMOJIS[idx % EMOJIS.length];
 
     postList += `
   <a href="/posts/${video.slug}/${post.slug}/" class="post-card">
-    <div class="post-thumb">📄</div>
+    <div class="post-thumb" style="background:${gradient}">${emoji}</div>
     <div class="post-body">
       <div class="post-title">${escapeHtml(post.title)}</div>
       <div class="post-meta">${shortDate(post.date)}</div>
