@@ -182,7 +182,9 @@ function discoverVideos() {
 
       const parsed = matter(raw);
       const slug = filename.replace(/\.md$/, '');
-      const htmlContent = marked.parse(parsed.content, { breaks: true, gfm: true });
+      let htmlContent = marked.parse(parsed.content, { breaks: true, gfm: true });
+      // Post-process: catch **bold** markers missed by marked (esp. with Korean + English parens)
+      htmlContent = htmlContent.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
 
       return {
         slug,
