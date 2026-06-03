@@ -1,10 +1,13 @@
 /**
  * Disclosure Door — Build Script
  *
- * Reads blog posts from the ufology-llm-wiki youtube directory,
- * converts markdown to HTML, and generates a static site.
+ * YouTube-inspired UFO disclosure blog site.
+ * Reads blog posts from ufology-llm-wiki youtube directory.
  *
- * Usage: node scripts/build.js [--watch]
+ * Structure:
+ *   /              — Homepage: grid of video cards
+ *   /videos/<slug>/ — Video page: blog posts + sidebar
+ *   /posts/<slug>/  — Individual blog post
  */
 
 const fs = require('fs');
@@ -19,9 +22,6 @@ const WIKI_ROOT = path.resolve(process.env.HOME, 'Documents/ufology-llm-wiki/you
 const OUTPUT_DIR = path.join(REPO_ROOT, 'dist');
 const SRC_DIR = path.join(REPO_ROOT, 'src');
 
-// Blog posts directory regex: extract Korean filename slug from path
-const BLOG_FILE_PATTERN = /youtube\/[^/]+\/blog\/(.+)\.md$/;
-
 // ─── Helpers ───────────────────────────────────────────────────
 
 function slugify(text) {
@@ -32,9 +32,23 @@ function slugify(text) {
     .toLowerCase();
 }
 
+function videoSlug(dirName) {
+  // Short hash-like slug from directory name
+  let hash = 0;
+  for (let i = 0; i < dirName.length; i++) {
+    const char = dirName.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
+  }
+  const shortName = dirName
+    .replace(/[^a-zA-Z0-9가-힣ㄱ-ㅎㅏ-ㅣ]/g, '')
+    .substring(0, 20)
+    .toLowerCase();
+  return `${shortName}-${Math.abs(hash).toString(36).substring(0, 6)}`;
+}
+
 function formatDate(dateStr) {
   if (!dateStr) return '';
-  // Handle YYYY-MM-DD
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return dateStr;
   return d.toLocaleDateString('ko-KR', {
@@ -42,6 +56,20 @@ function formatDate(dateStr) {
     month: 'long',
     day: 'numeric',
   });
+}
+
+function shortDate(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  const now = new Date();
+  const diff = now - d;
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  if (days === 0) return '오늘';
+  if (days === 1) return '어제';
+  if (days < 7) return `${days}일 전`;
+  if (days < 30) return `${Math.floor(days / 7)}주 전`;
+  return formatDate(dateStr);
 }
 
 function readFileSafe(filePath) {
@@ -52,9 +80,46 @@ function readFileSafe(filePath) {
   }
 }
 
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function getYoutubeId(url) {
+  if (!url) return null;
+  // https://www.youtube.com/watch?v=VIDEO_ID
+  const match = url.match(/[?&]v=([^&]+)/);
+  if (match) return match[1];
+  // https://youtu.be/VIDEO_ID
+  const short = url.match(/youtu\.be\/([^?&]+)/);
+  if (short) return short[1];
+  // /embed/VIDEO_ID
+  const embed = url.match(/\/embed\/([^/?&]+)/);
+  if (embed) return embed[1];
+  return null;
+}
+
+function youtubeThumbnailUrl(videoId) {
+  if (!videoId) return null;
+  // maxresdefault may not exist for all videos; onerror fallback in HTML
+  return `https://img.youtube.com/vi/${videoId}/maxresdefault.jpg`;
+}
+
+function normalizeTags(tags) {
+  if (!tags) return [];
+  if (typeof tags === 'string') return tags.split(/\s+/).filter(Boolean);
+  if (Array.isArray(tags)) return tags;
+  return [];
+}
+
+const CHANNEL_COLORS = ['c0', 'c1', 'c2', 'c0', 'c1'];
+
 // ─── Content Discovery ────────────────────────────────────────
 
-function discoverPosts() {
+function discoverVideos() {
   const videos = [];
 
   if (!fs.existsSync(WIKI_ROOT)) {
@@ -72,26 +137,27 @@ function discoverPosts() {
 
     const blogFiles = fs.readdirSync(blogDir).filter(f => f.endsWith('.md'));
 
-    // Check if the video has a translation file for source metadata
-    const translationDir = path.join(WIKI_ROOT, videoDir, 'translation');
+    // Gather video metadata from translation or raw files
     let videoMeta = {};
 
+    const translationDir = path.join(WIKI_ROOT, videoDir, 'translation');
     if (fs.existsSync(translationDir)) {
       const transFiles = fs.readdirSync(translationDir).filter(f => f.endsWith('.md'));
       if (transFiles.length > 0) {
-        const transContent = readFileSafe(path.join(translationDir, transFiles[0]));
-        if (transContent) {
-          const parsed = matter(transContent);
+        const content = readFileSafe(path.join(translationDir, transFiles[0]));
+        if (content) {
+          const parsed = matter(content);
           videoMeta = {
-            source_url: parsed.data.source || '',
+            source_url: parsed.data.source || parsed.data.source_url || '',
             channel: parsed.data.channel || '',
             video_title: parsed.data.title || videoDir,
+            description: parsed.data.description || '',
+            published_date: parsed.data.published_date || '',
           };
         }
       }
     }
 
-    // If no translation, look for raw transcript
     if (!videoMeta.source_url) {
       const rawDir = path.join(WIKI_ROOT, videoDir, 'raw');
       if (fs.existsSync(rawDir)) {
@@ -100,11 +166,10 @@ function discoverPosts() {
           const content = readFileSafe(path.join(rawDir, rf));
           if (content) {
             const parsed = matter(content);
-            if (parsed.data.source_url || parsed.data.source) {
-              videoMeta.source_url = parsed.data.source_url || parsed.data.source;
-              videoMeta.video_title = parsed.data.title || videoDir;
-              break;
-            }
+            videoMeta.source_url = parsed.data.source_url || parsed.data.source || videoMeta.source_url;
+            videoMeta.video_title = parsed.data.title || videoDir;
+            videoMeta.channel = parsed.data.channel || videoMeta.channel;
+            break;
           }
         }
       }
@@ -117,45 +182,50 @@ function discoverPosts() {
 
       const parsed = matter(raw);
       const slug = filename.replace(/\.md$/, '');
-
-      // Convert markdown to HTML
-      const htmlContent = marked.parse(parsed.content, {
-        breaks: true,
-        gfm: true,
-      });
+      const htmlContent = marked.parse(parsed.content, { breaks: true, gfm: true });
 
       return {
         slug,
         filename,
         title: parsed.data.title || slug,
         date: parsed.data.date || '',
-        tags: parsed.data.tags || [],
-        source: parsed.data.source || videoMeta.video_title || videoDir,
-        source_url: parsed.data.source_url || videoMeta.source_url || '',
+        tags: normalizeTags(parsed.data.tags),
         htmlContent,
-        videoDir,
-        filePath,
       };
     }).filter(Boolean);
 
-    if (posts.length > 0) {
-      // Sort by date descending
-      posts.sort((a, b) => {
-        if (a.date && b.date) return new Date(b.date) - new Date(a.date);
-        return 0;
-      });
+    if (posts.length === 0) continue;
 
-      videos.push({
-        title: videoMeta.video_title || videoDir,
-        source_url: videoMeta.source_url || '',
-        channel: videoMeta.channel || '',
-        dir: videoDir,
-        posts,
-      });
+    // If no published_date from translation/raw, check the first blog post
+    if (!videoMeta.published_date) {
+      const firstPostParsed = matter(readFileSafe(path.join(blogDir, blogFiles[0])) || '');
+      videoMeta.published_date = firstPostParsed.data?.published_date || '';
     }
+
+    posts.sort((a, b) => {
+      if (a.date && b.date) return new Date(b.date) - new Date(a.date);
+      return 0;
+    });
+
+    videos.push({
+      dir: videoDir,
+      slug: videoSlug(videoDir),
+      title: videoMeta.video_title || videoDir,
+      channel: videoMeta.channel || '',
+      source_url: videoMeta.source_url || '',
+      thumbnail_url: youtubeThumbnailUrl(getYoutubeId(videoMeta.source_url)),
+      published_year: videoMeta.published_date
+        ? (/^\d{4}$/.test(videoMeta.published_date)
+          ? parseInt(videoMeta.published_date, 10)
+          : new Date(videoMeta.published_date).getFullYear())
+        : null,
+      description: videoMeta.description || '',
+      posts,
+      postCount: posts.length,
+    });
   }
 
-  // Sort videos by most recent post
+  // Sort by most recent post
   videos.sort((a, b) => {
     const aDate = a.posts[0]?.date || '';
     const bDate = b.posts[0]?.date || '';
@@ -165,22 +235,21 @@ function discoverPosts() {
   return videos;
 }
 
-// ─── Template Helpers ─────────────────────────────────────────
+// ─── Marked renderer override ──────────────────────────────────
 
-function escapeHtml(str) {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+// heading token: { text, depth, tokens }
+// We override to add id attributes for anchor linking
+const renderer = {
+  heading({ text, depth, tokens }) {
+    const level = depth;
+    const plainText = tokens ? tokens.map(t => t.text || t.raw || '').join('') : String(text);
+    const id = slugify(plainText);
+    return `<h${level} id="${id}">${text}</h${level}>`;
+  }
+};
+marked.use({ renderer });
 
-function renderTags(tags) {
-  if (!tags || tags.length === 0) return '';
-  return tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
-}
-
-// ─── Page Templates ───────────────────────────────────────────
+// ─── Templates ─────────────────────────────────────────────────
 
 function baseHtml(title, content, extraHead = '') {
   return `<!DOCTYPE html>
@@ -194,79 +263,147 @@ function baseHtml(title, content, extraHead = '') {
   ${extraHead}
 </head>
 <body>
-  <div class="container">
-    <header>
-      <h1><a href="/" style="text-decoration:none;color:inherit">Disclosure Door</a></h1>
-      <p>한국어로 만나는 UFO 진실 — YouTube 콘텐츠 번역 블로그</p>
-      <p class="subtitle">UFO disclosure in Korean — translated YouTube content</p>
-    </header>
-
-    ${content}
-
-    <footer>
-      <p><a href="https://disclosuredoor.com">Disclosure Door</a> — UFO 진실을 한국어로</p>
-    </footer>
+  <div class="top-bar">
+    <div class="top-bar-inner">
+      <a href="/" class="logo">Disclosure Door</a>
+    </div>
   </div>
+  <div class="page">
+    ${content}
+  </div>
+  <footer>
+    <p><a href="/">Disclosure Door</a> — UFO 진실을 한국어로</p>
+  </footer>
 </body>
 </html>`;
 }
 
 function renderHomePage(videos) {
-  const totalPosts = videos.reduce((sum, v) => sum + v.posts.length, 0);
+  const totalPosts = videos.reduce((s, v) => s + v.postCount, 0);
 
-  let content = `<p style="text-align:center;color:var(--text-dim);margin-bottom:40px;font-size:0.95rem;">
-    총 ${totalPosts}개의 블로그 게시물 · ${videos.length}개의 YouTube 영상
-  </p>`;
+  let cards = '';
+  videos.forEach((video, idx) => {
+    const colorClass = CHANNEL_COLORS[idx % CHANNEL_COLORS.length];
+    cards += `
+  <a href="/videos/${video.slug}/" class="video-card">
+    <div class="video-thumb">
+      ${video.thumbnail_url
+        ? `<img src="${video.thumbnail_url}" alt="${escapeHtml(video.title)}" loading="lazy" onerror="this.parentElement.innerHTML='<div class=\\'play-icon\\'></div>';this.parentElement.querySelector('.play-icon').after(document.createTextNode(' '))">`
+        : `<div class="play-icon"></div>`}
+      <span class="duration-badge">${video.postCount} posts</span>
+    </div>
+    <div class="video-info">
+      <div class="channel-icon ${colorClass}">${video.channel ? video.channel.charAt(0).toUpperCase() : 'D'}</div>
+      <div class="video-meta">
+        <div class="video-title">${escapeHtml(video.title)}</div>
+        <div class="video-channel">${escapeHtml(video.channel || 'Disclosure Door')}</div>
+        <div class="video-stats">블로그 ${video.postCount}개${video.published_year ? ` · ${video.published_year}` : ''}</div>
+      </div>
+    </div>
+  </a>`;
+  });
 
-  for (const video of videos) {
-    content += `
-    <section class="source-card">
-      <h2>${escapeHtml(video.title)}</h2>`;
+  const content = `
+  <div class="video-grid">
+    ${cards}
+  </div>`;
 
-    if (video.source_url) {
-      content += `<p class="source-meta">원본: <a href="${escapeHtml(video.source_url)}" target="_blank" rel="noopener">YouTube</a>`;
-      if (video.channel) content += ` · ${escapeHtml(video.channel)}`;
-      content += `</p>`;
-    }
-
-    content += `<div class="post-list">`;
-
-    for (const post of video.posts) {
-      content += `
-      <a href="/posts/${post.slug}/" class="post-item">
-        <h3>${escapeHtml(post.title)}</h3>
-        <div class="post-meta">
-          ${post.date ? `<span>${formatDate(post.date)}</span>` : ''}
-        </div>
-        ${post.tags.length > 0 ? `<div class="post-tags">${renderTags(post.tags)}</div>` : ''}
-      </a>`;
-    }
-
-    content += `</div></section>`;
-  }
-
-  return baseHtml('홈', content);
+  return baseHtml('홈 — UFO 블로그', content);
 }
 
-function renderPostPage(post) {
-  const content = `
-  <article>
-    <header class="post-header">
-      <div class="breadcrumb">
-        <a href="/">홈</a> › ${escapeHtml(post.source)}
-      </div>
-      <h1>${escapeHtml(post.title)}</h1>
-      <div class="meta-line">
-        ${post.date ? `<span>${formatDate(post.date)}</span>` : ''}
-        ${post.source_url ? `<a href="${escapeHtml(post.source_url)}" target="_blank" rel="noopener">원본 영상</a>` : ''}
-      </div>
-      ${post.tags.length > 0 ? `<div class="tag-list">${renderTags(post.tags)}</div>` : ''}
-    </header>
-    <div class="post-content">
-      ${post.htmlContent}
+function renderVideoPage(video, allVideos) {
+  // Blog post list
+  let postList = '';
+  for (const post of video.posts) {
+    const tagsHtml = post.tags.length > 0
+      ? `<div class="post-tags">${post.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>`
+      : '';
+
+    postList += `
+  <a href="/posts/${video.slug}/${post.slug}/" class="post-card">
+    <div class="post-thumb">📄</div>
+    <div class="post-body">
+      <div class="post-title">${escapeHtml(post.title)}</div>
+      <div class="post-meta">${shortDate(post.date)}</div>
+      ${tagsHtml}
     </div>
-    <a href="/" class="back-to-top">← 목록으로</a>
-  </article>`;
+  </a>`;
+  }
+
+  // Sidebar: other videos
+  const otherVideos = allVideos.filter(v => v.slug !== video.slug);
+  let sidebar = `
+  <div class="sidebar-title">다른 영상</div>`;
+  for (const v of otherVideos) {
+    sidebar += `
+  <a href="/videos/${v.slug}/" class="sidebar-card">
+    <div class="sidebar-thumb">
+      ${v.thumbnail_url
+        ? `<img src="${v.thumbnail_url}" alt="${escapeHtml(v.title)}" style="width:100%;height:100%;object-fit:cover;" loading="lazy" onerror="this.parentElement.innerHTML='▶'">`
+        : `▶`}
+    </div>
+    <div class="sidebar-info">
+      <div class="sidebar-title">${escapeHtml(v.title)}</div>
+      <div class="sidebar-channel">블로그 ${v.postCount}개${v.published_year ? ` · ${v.published_year}` : ''}</div>
+    </div>
+  </a>`;
+  }
+
+  const colorClass = CHANNEL_COLORS[allVideos.indexOf(video) % CHANNEL_COLORS.length];
+  const channelInitial = video.channel ? video.channel.charAt(0).toUpperCase() : 'D';
+
+  const content = `
+  <div class="video-detail">
+    <div class="video-detail-main">
+      <div class="video-info-bar">
+        ${video.thumbnail_url
+          ? `<img src="${video.thumbnail_url}" alt="" class="video-info-thumb" loading="lazy" onerror="this.style.display='none'">`
+          : ''}
+        <div class="video-info-text">
+          <h1 class="video-title-lg">${escapeHtml(video.title)}</h1>
+          <div class="video-actions">
+            <div class="channel-badge">
+              <div class="icon ${colorClass}">${channelInitial}</div>
+              <span>${escapeHtml(video.channel || 'Disclosure Door')}</span>
+            </div>
+            ${video.source_url ? `<a href="${escapeHtml(video.source_url)}" target="_blank" rel="noopener" class="yt-link">YouTube에서 보기</a>` : ''}
+          </div>
+        </div>
+      </div>
+      <div class="post-grid">
+        ${postList}
+      </div>
+    </div>
+    <div class="video-sidebar">
+      ${otherVideos.length > 0 ? sidebar : ''}
+    </div>
+  </div>`;
+
+  return baseHtml(`${video.title}`, content);
+}
+
+function renderPostPage(post, video) {
+  const tagsHtml = post.tags.length > 0
+    ? `<div class="tag-list">${post.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</div>`
+    : '';
+
+  const content = `
+  <div class="article-page">
+    <a href="/videos/${video.slug}/" class="back-link">${escapeHtml(video.title)}</a>
+    <article>
+      <header class="post-header">
+        <h1>${escapeHtml(post.title)}</h1>
+        <div class="meta-line">
+          ${post.date ? `<span>${formatDate(post.date)}</span>` : ''}
+          ${video.source_url ? `<a href="${escapeHtml(video.source_url)}" target="_blank" rel="noopener">원본 영상</a>` : ''}
+        </div>
+        ${tagsHtml}
+      </header>
+      <div class="post-content">
+        ${post.htmlContent}
+      </div>
+    </article>
+  </div>`;
 
   return baseHtml(post.title, content);
 }
@@ -275,12 +412,12 @@ function renderPostPage(post) {
 
 function build() {
   console.log('🔍 Discovering blog posts...');
-  const videos = discoverPosts();
+  const videos = discoverVideos();
 
-  if (videos.length === 0) {
+  const total = videos.reduce((s, v) => s + v.postCount, 0);
+  if (total === 0) {
     console.warn('⚠️  No blog posts found. Check wiki path:', WIKI_ROOT);
   } else {
-    const total = videos.reduce((s, v) => s + v.posts.length, 0);
     console.log(`📦 Found ${total} blog posts across ${videos.length} videos`);
   }
 
@@ -301,15 +438,26 @@ function build() {
     }
   }
 
-  // Build posts
+  // Build video pages
+  for (const video of videos) {
+    const videoDir = path.join(OUTPUT_DIR, 'videos', video.slug);
+    fs.mkdirSync(videoDir, { recursive: true });
+
+    const videoHtml = renderVideoPage(video, videos);
+    fs.writeFileSync(path.join(videoDir, 'index.html'), videoHtml, 'utf-8');
+    console.log(`  ✓ /videos/${video.slug}/ (${video.postCount} posts)`);
+  }
+
+  // Build blog posts
+  let builtPosts = 0;
   for (const video of videos) {
     for (const post of video.posts) {
-      const postDir = path.join(OUTPUT_DIR, 'posts', post.slug);
+      const postDir = path.join(OUTPUT_DIR, 'posts', video.slug, post.slug);
       fs.mkdirSync(postDir, { recursive: true });
 
-      const html = renderPostPage(post);
+      const html = renderPostPage(post, video);
       fs.writeFileSync(path.join(postDir, 'index.html'), html, 'utf-8');
-      console.log(`  ✓ /posts/${post.slug}/`);
+      builtPosts++;
     }
   }
 
@@ -318,12 +466,10 @@ function build() {
   fs.writeFileSync(path.join(OUTPUT_DIR, 'index.html'), homeHtml, 'utf-8');
   console.log('📄 Built index.html');
 
-  // Print summary
-  const totalPosts = videos.reduce((s, v) => s + v.posts.length, 0);
-  console.log(`\n✅ Done! ${totalPosts} posts built → ${OUTPUT_DIR}`);
+  console.log(`\n✅ Done! ${builtPosts} posts in ${videos.length} videos → ${OUTPUT_DIR}`);
 }
 
-// ─── Entry ─────────────────────────────────────────────────────
+// ─── Watch Mode ────────────────────────────────────────────────
 
 const args = process.argv.slice(2);
 if (args.includes('--watch')) {
